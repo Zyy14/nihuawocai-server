@@ -1,9 +1,10 @@
 /**
  * 你画我猜 — WebSocket 服务端入口
  *
- * 启动：node server.js
- * 默认端口 3000，可通过 PORT 环境变量修改
- * 支持本地运行与 Render / Railway 等云平台部署
+ * 本地开发：node server.js（默认 3000）
+ * 线上部署：Render / Railway 等 PaaS 会注入 PORT 环境变量
+ *
+ * 架构：HTTP Server（健康检查）+ WebSocket Server（游戏通信）共用同一端口
  */
 
 const http = require('http');
@@ -11,20 +12,46 @@ const WebSocket = require('ws');
 const RoomManager = require('./room');
 
 const PORT = Number(process.env.PORT) || 3000;
+const HEARTBEAT_INTERVAL = 30000; // 30 秒心跳，防止云平台断开空闲连接
+const rm = new RoomManager();
 
+/* ========== HTTP 服务（健康检查 + 默认响应） ========== */
 const httpServer = http.createServer((req, res) => {
+  if (req.url === '/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      status: 'ok',
+      rooms: rm.rooms.size,
+      uptime: Math.floor(process.uptime())
+    }));
+    return;
+  }
   res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
   res.end('你画我猜 WebSocket 服务运行中');
 });
 
+/* ========== WebSocket 服务 ========== */
 const wss = new WebSocket.Server({ server: httpServer });
-const rm = new RoomManager();
 
 /** connId → { roomCode, playerId } */
 const connections = new Map();
 let connSeq = 0;
 
+/* --- 心跳检测：清除无响应的死连接 --- */
+const heartbeat = setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (ws._isAlive === false) return ws.terminate();
+    ws._isAlive = false;
+    ws.ping();
+  });
+}, HEARTBEAT_INTERVAL);
+
+wss.on('close', () => clearInterval(heartbeat));
+
 wss.on('connection', (ws) => {
+  ws._isAlive = true;
+  ws.on('pong', () => { ws._isAlive = true; });
+
   const connId = `c_${++connSeq}`;
   console.log(`[连接] 新连接 ${connId}，当前在线 ${wss.clients.size}`);
 
@@ -163,10 +190,12 @@ function send(ws, data) {
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data));
 }
 
+/* ========== 启动 ========== */
 httpServer.listen(PORT, () => {
   console.log('==========================================');
   console.log('  你画我猜 WebSocket 服务已启动');
   console.log(`  端口: ${PORT}`);
-  console.log(`  ws://localhost:${PORT}`);
+  console.log(`  本地: ws://localhost:${PORT}`);
+  console.log(`  健康检查: http://localhost:${PORT}/health`);
   console.log('==========================================');
 });
