@@ -15,8 +15,17 @@ const PORT = Number(process.env.PORT) || 3000;
 const HEARTBEAT_INTERVAL = 30000; // 30 秒心跳，防止云平台断开空闲连接
 const rm = new RoomManager();
 
-/* ========== HTTP 服务（健康检查 + 默认响应） ========== */
+/* ========== HTTP 服务（保活 + 健康检查 + 默认响应） ========== */
 const httpServer = http.createServer((req, res) => {
+  // 极简保活端点：专供 cron-job 定时访问
+  // 返回 204 No Content —— 无响应体、无 JSON 序列化、资源消耗最低
+  if (req.url === '/ping') {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
+  // 健康检查端点：返回运行状态 JSON（供人工排查用）
   if (req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
@@ -26,6 +35,7 @@ const httpServer = http.createServer((req, res) => {
     }));
     return;
   }
+
   res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
   res.end('你画我猜 WebSocket 服务运行中');
 });
@@ -48,23 +58,28 @@ const heartbeat = setInterval(() => {
 
 wss.on('close', () => clearInterval(heartbeat));
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
   ws._isAlive = true;
   ws.on('pong', () => { ws._isAlive = true; });
 
   const connId = `c_${++connSeq}`;
-  console.log(`[连接] 新连接 ${connId}，当前在线 ${wss.clients.size}`);
+  // 接入日志：记录握手时间、来源 IP、UA，便于与客户端日志对齐
+  const ip = (req && (req.headers['x-forwarded-for'] || req.socket.remoteAddress)) || 'unknown';
+  const ua = (req && req.headers['user-agent']) || 'unknown';
+  console.log(`[连接] ${new Date().toISOString()} 新连接 ${connId} 在线=${wss.clients.size} ip=${ip} ua=${ua}`);
 
   ws.on('message', (raw) => {
     let msg;
     try { msg = JSON.parse(raw); } catch (_) {
+      console.warn(`[消息异常] ${connId} 非法 JSON`);
       return send(ws, { type: 'error_msg', message: '消息格式错误' });
     }
+    console.log(`[消息] ${connId} ← ${msg.type}`);
     handleMessage(ws, connId, msg);
   });
 
-  ws.on('close', () => {
-    console.log(`[断开] ${connId}`);
+  ws.on('close', (code, reason) => {
+    console.log(`[断开] ${new Date().toISOString()} ${connId} code=${code} reason=${reason || ''}`);
     const info = connections.get(connId);
     if (info) {
       rm.removePlayer(info.roomCode, info.playerId);
@@ -72,7 +87,7 @@ wss.on('connection', (ws) => {
     }
   });
 
-  ws.on('error', (err) => console.error(`[错误] ${connId}`, err.message));
+  ws.on('error', (err) => console.error(`[错误] ${connId}`, err && err.message));
 });
 
 /* ========================================
@@ -196,6 +211,7 @@ httpServer.listen(PORT, () => {
   console.log('  你画我猜 WebSocket 服务已启动');
   console.log(`  端口: ${PORT}`);
   console.log(`  本地: ws://localhost:${PORT}`);
+  console.log(`  保活端点: http://localhost:${PORT}/ping (204)`);
   console.log(`  健康检查: http://localhost:${PORT}/health`);
   console.log('==========================================');
 });
