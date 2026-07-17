@@ -1,7 +1,7 @@
 /**
  * 服务端词库模块
- * 包含动物、日常物品、成语三大分类
- * 每个词条附带近义词列表用于模糊匹配
+ * 词条按「分类」组织（附近义词用于模糊匹配）；
+ * 「主题(theme)」是分类的组合，开局由房主选择，服务端据此选词。
  */
 
 const WORD_BANK = {
@@ -66,20 +66,65 @@ const WORD_BANK = {
     { word: '画龙点睛', synonyms: [] },
     { word: '鸡飞蛋打', synonyms: [] },
   ],
+  food: [
+    { word: '汉堡', synonyms: ['汉堡包'] },
+    { word: '披萨', synonyms: ['比萨', 'pizza'] },
+    { word: '寿司', synonyms: [] },
+    { word: '火锅', synonyms: [] },
+    { word: '冰淇淋', synonyms: ['雪糕', '冰激凌'] },
+    { word: '包子', synonyms: [] },
+    { word: '饺子', synonyms: ['水饺'] },
+    { word: '面条', synonyms: ['面', '拉面'] },
+    { word: '寿面', synonyms: [] },
+    { word: '烤鸭', synonyms: ['北京烤鸭'] },
+    { word: '珍珠奶茶', synonyms: ['奶茶'] },
+    { word: '薯条', synonyms: [] },
+    { word: '爆米花', synonyms: [] },
+    { word: '甜甜圈', synonyms: ['甜圈'] },
+    { word: '棒棒糖', synonyms: [] },
+  ],
 };
+
+/**
+ * 主题：分类的组合。房主开局选择，缺省为「综合(mixed)」。
+ * 保持与客户端 utils/wordbank.js 的 THEMES 一致。
+ */
+const THEMES = {
+  mixed:  { name: '综合', cats: ['animal', 'daily', 'idiom', 'food'] },
+  animal: { name: '动物', cats: ['animal'] },
+  daily:  { name: '日常', cats: ['daily'] },
+  food:   { name: '美食', cats: ['food'] },
+  idiom:  { name: '成语', cats: ['idiom'] },
+};
+
+/** 主题合法性归一：非法/缺省一律回落到 mixed，避免异常入参破坏流程 */
+function normalizeTheme(theme) {
+  return THEMES[theme] ? theme : 'mixed';
+}
 
 /**
  * 随机选取一个词条（避免重复）
  * @param {string[]} usedWords 已使用过的词语
+ * @param {string} [theme] 主题 key，决定候选分类范围；缺省/非法回落到 mixed
  * @returns {{ word: string, synonyms: string[], category: string }}
  */
-function getRandomWord(usedWords) {
-  const cats = Object.keys(WORD_BANK);
-  const cat = cats[Math.floor(Math.random() * cats.length)];
-  let pool = WORD_BANK[cat].filter(w => !usedWords.includes(w.word));
-  if (pool.length === 0) pool = WORD_BANK[cat]; // 词库用完则重置
-  const entry = pool[Math.floor(Math.random() * pool.length)];
-  return { word: entry.word, synonyms: entry.synonyms, category: cat };
+function getRandomWord(usedWords, theme) {
+  const cats = THEMES[normalizeTheme(theme)].cats;
+  // 汇总主题下所有分类的未使用词条
+  let pool = [];
+  cats.forEach((cat) => {
+    (WORD_BANK[cat] || []).forEach((w) => {
+      if (!usedWords.includes(w.word)) pool.push({ entry: w, cat });
+    });
+  });
+  // 全部用完则在主题范围内重置
+  if (pool.length === 0) {
+    cats.forEach((cat) => {
+      (WORD_BANK[cat] || []).forEach((w) => pool.push({ entry: w, cat }));
+    });
+  }
+  const picked = pool[Math.floor(Math.random() * pool.length)];
+  return { word: picked.entry.word, synonyms: picked.entry.synonyms, category: picked.cat };
 }
 
 /**
@@ -96,4 +141,4 @@ function checkAnswer(guess, wordEntry) {
   return false;
 }
 
-module.exports = { WORD_BANK, getRandomWord, checkAnswer };
+module.exports = { WORD_BANK, THEMES, normalizeTheme, getRandomWord, checkAnswer };

@@ -4,7 +4,7 @@
  * RoomManager — 全局房间集合的 CRUD
  */
 
-const { getRandomWord, checkAnswer } = require('./wordbank');
+const { getRandomWord, checkAnswer, normalizeTheme } = require('./wordbank');
 const { calculateGuesserScore, calculateDrawerScore } = require('./scoring');
 const WebSocket = require('ws');
 
@@ -47,6 +47,7 @@ class Room {
     this.correctGuessers = new Set();
     this.usedWords = [];
     this.round = 0;
+    this.theme = 'mixed'; // 词库主题，startGame 时按房主选择设定
   }
 
   get totalRounds() { return this.drawerOrder.length; }
@@ -93,13 +94,14 @@ class Room {
   }
 
   /* ---------- 游戏流程 ---------- */
-  startGame() {
+  startGame(theme) {
     if (this.players.size < 2) return { error: '至少需要 2 名玩家' };
     for (const p of this.players.values()) { p.score = 0; p.roundScore = 0; }
     this.drawerOrder = shuffle([...this.players.keys()]);
     this.drawerIdx = -1;
     this.round = 0;
     this.usedWords = [];
+    this.theme = normalizeTheme(theme);
     this.state = 'playing';
     return { success: true };
   }
@@ -120,7 +122,7 @@ class Room {
       return null;
     }
 
-    const entry = getRandomWord(this.usedWords);
+    const entry = getRandomWord(this.usedWords, this.theme);
     this.currentWordEntry = entry;
     this.usedWords.push(entry.word);
     this.correctGuessers = new Set();
@@ -321,13 +323,13 @@ class RoomManager {
     });
   }
 
-  startGame(code, pid) {
+  startGame(code, pid, theme) {
     const room = this.rooms.get(code);
     if (!room) return { error: '房间不存在' };
     const p = room.players.get(pid);
     if (!p || !p.isOwner) return { error: '只有房主可以开始游戏' };
 
-    const result = room.startGame();
+    const result = room.startGame(theme);
     if (result.error) return result;
 
     room.broadcast({ type: 'game_start' });

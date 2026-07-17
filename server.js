@@ -10,6 +10,7 @@
 const http = require('http');
 const WebSocket = require('ws');
 const RoomManager = require('./room');
+const { code2Session, msgSecCheck } = require('./wxSecurity');
 
 const PORT = Number(process.env.PORT) || 3000;
 const HEARTBEAT_INTERVAL = 30000; // 30 秒心跳，防止云平台断开空闲连接
@@ -45,6 +46,8 @@ const wss = new WebSocket.Server({ server: httpServer });
 
 /** connId → { roomCode, playerId } */
 const connections = new Map();
+/** connId → openid（wx.login 换取，用于 msgSecCheck 内容检测） */
+const openids = new Map();
 let connSeq = 0;
 
 /* --- 心跳检测：清除无响应的死连接 --- */
@@ -75,7 +78,9 @@ wss.on('connection', (ws, req) => {
       return send(ws, { type: 'error_msg', message: '消息格式错误' });
     }
     console.log(`[消息] ${connId} ← ${msg.type}`);
-    handleMessage(ws, connId, msg);
+    Promise.resolve(handleMessage(ws, connId, msg)).catch((e) => {
+      console.error(`[消息处理异常] ${connId} ${msg.type}`, e && e.message);
+    });
   });
 
   ws.on('close', (code, reason) => {
@@ -85,6 +90,7 @@ wss.on('connection', (ws, req) => {
       rm.removePlayer(info.roomCode, info.playerId);
       connections.delete(connId);
     }
+    openids.delete(connId);
   });
 
   ws.on('error', (err) => console.error(`[错误] ${connId}`, err && err.message));
@@ -93,13 +99,26 @@ wss.on('connection', (ws, req) => {
 /* ========================================
  *  消息路由
  * ======================================== */
-function handleMessage(ws, connId, msg) {
+async function handleMessage(ws, connId, msg) {
   switch (msg.type) {
+
+    /* ---------- 登录鉴权：换取 openid 供内容检测 ---------- */
+    case 'login': {
+      const { openid } = await code2Session(msg.code);
+      if (openid) openids.set(connId, openid);
+      console.log(`[登录] ${connId} openid=${openid ? '已获取' : '未获取'}`);
+      break;
+    }
 
     /* ---------- 房间 ---------- */
     case 'create_room': {
       const nick = (msg.nickname || '').trim();
       if (!nick) return send(ws, { type: 'error_msg', message: '昵称不能为空' });
+
+      // 内容安全检测点 ①：昵称
+      const nickOk = await msgSecCheck(nick, openids.get(connId));
+      if (!nickOk) return send(ws, { type: 'error_msg', message: '昵称包含违规内容，请修改' });
+
       const res = rm.createRoom(ws, nick);
       connections.set(connId, { roomCode: res.roomCode, playerId: res.playerId });
       send(ws, { type: 'room_created', roomCode: res.roomCode, playerId: res.playerId });
@@ -112,6 +131,10 @@ function handleMessage(ws, connId, msg) {
       const code = msg.roomCode;
       if (!nick) return send(ws, { type: 'error_msg', message: '昵称不能为空' });
       if (!code) return send(ws, { type: 'error_msg', message: '房间号不能为空' });
+
+      // 内容安全检测点 ②：昵称
+      const nickOk = await msgSecCheck(nick, openids.get(connId));
+      if (!nickOk) return send(ws, { type: 'error_msg', message: '昵称包含违规内容，请修改' });
 
       const res = rm.joinRoom(ws, code, nick);
       if (res.error) return send(ws, { type: 'error_msg', message: res.error });
@@ -145,9 +168,9 @@ function handleMessage(ws, connId, msg) {
     case 'start_game': {
       const info = connections.get(connId);
       if (!info) return;
-      const res = rm.startGame(info.roomCode, info.playerId);
+      const res = rm.startGame(info.roomCode, info.playerId, msg.theme);
       if (res.error) return send(ws, { type: 'error_msg', message: res.error });
-      console.log(`[游戏] ${info.roomCode} 游戏开始`);
+      console.log(`[协作] ${info.roomCode} 开始，主题=${msg.theme || 'mixed'}`);
       break;
     }
 
@@ -168,7 +191,13 @@ function handleMessage(ws, connId, msg) {
     case 'guess': {
       const info = connections.get(connId);
       if (!info) return;
-      rm.handleGuess(info.roomCode, info.playerId, msg.text || '');
+      const text = msg.text || '';
+
+      // 内容安全检测点 ③：猜词/聊天文字（广播前拦截）
+      const textOk = await msgSecCheck(text, openids.get(connId));
+      if (!textOk) return send(ws, { type: 'error_msg', message: '内容不合规，已拦截' });
+
+      rm.handleGuess(info.roomCode, info.playerId, text);
       break;
     }
 
